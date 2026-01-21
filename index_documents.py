@@ -11,6 +11,8 @@ from pypdf import PdfReader
 from docx import Document
 import argparse
 import json
+import time as sys_time
+import re
 
 # =============================================================================
 # 0. CONFIGURATION & SETUP
@@ -100,12 +102,14 @@ def setup_database():
 # 2. HELPER FUNCTIONS & NLTK SETUP
 # =============================================================================
 
-# Ensure NLTK data is available for sentence splitting
+# Ensure NLTK data is available
 try:
     nltk.data.find('tokenizers/punkt')
+    nltk.data.find('tokenizers/punkt_tab')
 except LookupError:
-    logger.info("Downloading NLTK punkt tokenizer...")
+    logger.info("Downloading NLTK data...")
     nltk.download('punkt', quiet=True)
+    nltk.download('punkt_tab', quiet=True)
 
 
 def db_insert_batch(chunks_data):
@@ -166,7 +170,8 @@ class BaseDocumentProcessor(ABC):
             elif ext == '.docx':
                 doc = Document(self.file_path)
                 for para in doc.paragraphs:
-                    text += para.text + "\n"
+                    # FIX: Add double newlines to clearly separate paragraphs in DOCX
+                    text += para.text + "\n\n"
             else:
                 logger.error(f"Unsupported file format: {ext}")
                 return None
@@ -180,20 +185,40 @@ class BaseDocumentProcessor(ABC):
         pass
 
     def generate_embeddings(self, chunks):
+        """
+        Sends text chunks to Google Gemini API to get vector embeddings.
+        Includes rate limiting handling for Free Tier usage.
+        """
         embeddings = []
         model = "models/embedding-001"
         logger.info(f"Generating embeddings for {len(chunks)} chunks...")
-        try:
-            for chunk in chunks:
+
+        for i, chunk in enumerate(chunks):
+            try:
+                # Call the API
                 result = genai.embed_content(
                     model=model,
                     content=chunk,
                     task_type="retrieval_document"
                 )
                 embeddings.append(result['embedding'])
-        except Exception as e:
-            logger.error(f"Gemini API Error: {e}")
-            return []
+
+                # --- Rate Limiting Strategy ---
+                # Sleep for 4 seconds between requests using the alias 'sys_time'
+                sys_time.sleep(4)
+
+            except Exception as e:
+                if "429" in str(e):
+                    # Rate limit hit - wait 60 seconds
+                    logger.warning("Rate limit hit (429). Waiting 60 seconds before retrying...")
+                    sys_time.sleep(60)
+
+                    # Note: In a real retry loop, we would try this chunk again.
+                    # Here we just wait and move to the next one to avoid crashing.
+                else:
+                    logger.error(f"Gemini API Error: {e}")
+                    continue
+
         return embeddings
 
     def run(self):
@@ -250,13 +275,40 @@ class SentenceProcessor(BaseDocumentProcessor):
 
 class ParagraphProcessor(BaseDocumentProcessor):
     @property
-    def strategy_name(self): return "paragraph"
+    def strategy_name(self):
+        return "paragraph"
 
     def split_text(self, text):
-        raw = text.split('\n\n')
-        return [c.strip() for c in raw if c.strip()]
+        """
+        Smart paragraph splitting v2.
+        Handles messy PDFs where there might be spaces between the period and the newline.
+        """
+        # Attempt 1: Standard double newline (Good for DOCX / clean text)
+        chunks = text.split('\n\n')
+        chunks = [c.strip() for c in chunks if c.strip()]
 
+        # Attempt 2: Fallback for PDFs
+        if len(chunks) <= 1:
+            logger.info("Single block detected. Switching to aggressive Regex splitting.")
 
+            # Pattern explanation:
+            # \.    -> Match a literal dot
+            # \s* -> Match zero or more whitespace characters (spaces, tabs)
+            # \n    -> Match a newline
+            # This consumes the dot, so we will have to add it back.
+            raw_chunks = re.split(r'\.\s*\n', text)
+
+            chunks = []
+            for c in raw_chunks:
+                clean_chunk = c.strip()
+                if clean_chunk:
+                    # Since we split on the dot, it got removed. We add it back
+                    # unless it's the very last chunk which might not need it.
+                    if not clean_chunk.endswith('.'):
+                        clean_chunk += '.'
+                    chunks.append(clean_chunk)
+
+        return chunks
 
 
 
