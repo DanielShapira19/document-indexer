@@ -9,6 +9,8 @@ import nltk
 from abc import ABC, abstractmethod
 from pypdf import PdfReader
 from docx import Document
+import argparse
+import json
 
 # =============================================================================
 # 0. CONFIGURATION & SETUP
@@ -254,6 +256,138 @@ class ParagraphProcessor(BaseDocumentProcessor):
         raw = text.split('\n\n')
         return [c.strip() for c in raw if c.strip()]
 
+
+
+
+
+# =============================================================================
+# 5. FACTORY & EXECUTION LOGIC
+# =============================================================================
+
+def get_processor(strategy, file_path, **kwargs):
+    """
+    Factory function to instantiate the correct processor class.
+    Passes any additional arguments (kwargs) like chunk_size/overlap to the processor.
+    """
+    strategies = {
+        'fixed': FixedSizeProcessor,
+        'sentence': SentenceProcessor,
+        'paragraph': ParagraphProcessor
+    }
+
+    processor_class = strategies.get(strategy)
+    if not processor_class:
+        raise ValueError(f"Unknown strategy: {strategy}")
+
+    # Initialize the specific processor with the file path and any options
+    return processor_class(file_path, **kwargs)
+
+
+def process_file_with_strategies(file_path, strategies_list, **options):
+    """
+    Orchestrates the processing of a single file using one or more strategies.
+    'options' contains dynamic settings like chunk_size.
+    """
+    if not os.path.exists(file_path):
+        logger.error(f"File not found: {file_path}")
+        return
+
+    for strategy in strategies_list:
+        try:
+            # Create processor using the Factory
+            processor = get_processor(strategy, file_path, **options)
+            # Execute the Template Method
+            processor.run()
+        except Exception as e:
+            logger.error(f"Error processing {file_path} with strategy '{strategy}': {e}")
+
+
+def run_from_config(config_path):
+    """
+    Batch processing mode.
+    Reads a JSON file containing a list of documents and their specific settings.
+    """
+    if not os.path.exists(config_path):
+        logger.error(f"Config file not found: {config_path}")
+        return
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        documents = data.get('documents', [])
+        logger.info(f"Loaded configuration. Processing {len(documents)} documents.")
+
+        for item in documents:
+            path = item.get('path')
+            # Default to 'fixed' if strategies are not specified
+            strats = item.get('strategies', ['fixed'])
+
+            # Extract specific options from the JSON item (e.g., chunk_size)
+            # We pass the whole item dictionary as kwargs
+            if path:
+                process_file_with_strategies(path, strats, **item)
+            else:
+                logger.warning("Skipping config item missing 'path'.")
+
+    except json.JSONDecodeError:
+        logger.error("Invalid JSON format in config file.")
+    except Exception as e:
+        logger.error(f"Error reading config: {e}")
+
+
+# =============================================================================
+# 6. MAIN ENTRY POINT (CLI)
+# =============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(description="Document Indexer with Gemini & PostgreSQL")
+
+    # Mutually Exclusive Group: User must choose either --file OR --config
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--file", help="Path to a single PDF/DOCX file")
+    group.add_argument("--config", help="Path to a JSON configuration file for batch processing")
+
+    # Optional arguments for single file mode
+    parser.add_argument("--strategies", nargs="+",
+                        choices=["fixed", "sentence", "paragraph"],
+                        default=["fixed"],
+                        help="List of strategies to apply (e.g. --strategies fixed sentence)")
+
+    # Dynamic parameters (passed to kwargs)
+    parser.add_argument("--chunk-size", type=int, default=500, help="Chunk size for fixed strategy")
+    parser.add_argument("--overlap", type=int, default=50, help="Overlap size for fixed strategy")
+
+    # DB Setup flag
+    parser.add_argument("--setup-db", action="store_true", help="Run initial DB table creation before processing")
+
+    args = parser.parse_args()
+
+    # Step 1: Optional Database Setup
+    if args.setup_db:
+        setup_database()
+
+    # Step 2: Execution Mode
+    if args.config:
+        # Batch Mode
+        logger.info(f"Starting Batch Mode from: {args.config}")
+        run_from_config(args.config)
+
+    elif args.file:
+        # Single File Mode
+        logger.info(f"Starting Single File Mode: {args.file}")
+
+        # Pack the dynamic arguments into a dictionary
+        options = {
+            "chunk_size": args.chunk_size,
+            "overlap": args.overlap
+        }
+
+        process_file_with_strategies(args.file, args.strategies, **options)
+
+
+if __name__ == "__main__":
+    main()
 
 
 
