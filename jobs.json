@@ -1,0 +1,14 @@
+{
+  "documents": [
+    {
+      "path": "test.pdf",
+      "strategies": ["fixed"],
+      "chunk_size": 200,
+      "overlap": 20
+    },
+    {
+      "path": "test.pdf",
+      "strategies": ["sentence", "paragraph"]
+    }
+  ]
+}
